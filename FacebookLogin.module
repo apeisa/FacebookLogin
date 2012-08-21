@@ -1,0 +1,238 @@
+<?php
+/*
+
+What this module does under the hood:
+
+1. Creates new hidden field for user template called facebook_id
+2.
+
+*/
+class FacebookLogin extends WireData implements Module, ConfigurableModule {
+
+	const name = 'facebook-login';
+	const fieldName = 'facebook_id';
+
+	public static function getModuleInfo() {
+		return array(
+		 "title" => "Facebook login for website",
+		 "version" => 100,
+		 "summary" => "Allows users to authenticate through Facebook. If first time, it let's you choose username.",
+		 "autoload" => false
+		);
+	}
+
+	public function init() {
+
+	}
+
+	public function execute() {
+		$app_id = $this->facebookAppId;
+		$app_secret = $this->facebookAppSecret;
+		$my_url = $this->page->httpUrl;
+
+		//session_start();
+		$code = $_REQUEST["code"];
+
+		if(empty($code)) {
+			$_SESSION['state'] = md5(uniqid(rand(), TRUE)); //CSRF protection
+			$dialog_url = "http://www.facebook.com/dialog/oauth?client_id="
+				. $app_id . "&redirect_uri=" . urlencode($my_url) . "&state="
+				. $_SESSION['state'];
+
+			echo("<script> top.location.href='" . $dialog_url . "'</script>");
+		}
+
+		if($_SESSION['state'] && ($_SESSION['state'] === $_REQUEST['state'])) {
+			$token_url = "https://graph.facebook.com/oauth/access_token?"
+				. "client_id=" . $app_id . "&redirect_uri=" . urlencode($my_url)
+				. "&client_secret=" . $app_secret . "&code=" . $code;
+
+			$response = file_get_contents($token_url);
+			$params = null;
+			parse_str($response, $params);
+
+			$graph_url = "https://graph.facebook.com/me?access_token="
+				. $params['access_token'];
+
+			$fbUserData = json_decode(file_get_contents($graph_url));
+			return $this->processLogin($fbUserData);
+		}
+		else {
+			echo("The state does not match. You may be a victim of CSRF.");
+		}
+	}
+
+	public function processLogin($fbUserData) {
+		$id = $fbUserData->id;
+		$u = $this->users->get("facebook_id=$id");
+
+		// First we create random pass to use in login
+		$uniqid = uniqid();
+		$pass = sha1($uniqid . $id . $fbUserData->updated_time);
+
+		// User has logged in earlier with facebook id, great news let's login
+		if ($u->id) {
+			$u->of(false);
+			$u->pass = $pass;
+			$u->addRole(self::name);
+			$u->save();
+		}
+
+		// User has not logged in before and autogenerate is on
+		else if (!$this->disableAutogenerate) {
+			$name = $this->sanitizer->pageName($fbUserData->name, true);
+			$u = $this->users->get("name=$name");
+
+			// If there is already user account with same name than current logger has in facebook, then add a running number as a suffix
+			if ($u->id) {
+				if (!isset($fbUserData->counter)) {
+					$fbUserData->counter = 2;
+					$fbUserData->origName = $fbUserData->name;
+				} else {
+					$fbUserData->counter++;
+				}
+				$fbUserData->name = $fbUserData->origName . $fbUserData->counter;
+				$this->processLogin($fbUserData);
+			}
+
+			// All seems to be fine, let's create the user
+			$u = new User;
+			$u->name = $name;
+			$u->facebook_id = $fbUserData->id;
+			$u->pass = $pass;
+			$u->addRole(self::name);
+			$u->save();
+		} else {
+			echo $this->renderCreateUserForm();
+		}
+
+		$this->session->login($u->name, $pass);
+		$p = $this->pages->get($this->redirectPage);
+		if (!$p->id) {
+			$p = $this->pages->get(1);
+		}
+		$this->session->redirect($p->httpUrl);
+	}
+
+	public function renderCreateUserForm() {
+
+	}
+
+	static public function getModuleConfigInputfields(Array $data) {
+		$fields = new InputfieldWrapper();
+
+		// since this is a static function, we can't use $this->modules, so get them from the global wire() function
+		$modules = wire('modules');
+
+		$field = $modules->get("InputfieldText");
+		$field->attr('name', 'facebookAppId');
+		$field->attr('value', $data['facebookAppId']);
+		$field->label = "Facebook App Id";
+		$field->description = 'App Id for your website. You can create one from here: https://developers.facebook.com/apps/';
+		$fields->add($field);
+
+		$field = $modules->get("InputfieldText");
+		$field->attr('name', 'facebookAppSecret');
+		$field->attr('value', $data['facebookAppSecret']);
+		$field->label = "Facebook App Secret";
+		$field->description = 'App Secret for your website. After you have created your "facebook app", you find this from: https://developers.facebook.com/apps/';
+		$fields->add($field);
+
+		/*
+		$field = $modules->get("InputfieldCheckbox");
+		$field->attr('name', 'disableAutogenerate');
+		$field->attr('value', 1);
+		$field->attr('checked', empty($data['disableAutogenerate']) ? '' : 'checked');
+		$field->label = "Don't set username automatically, but let the user choose username when doing the first login";
+		$fields->add($field);
+		*/
+
+		$field = $modules->get("InputfieldPageListSelect");
+		$field->attr('name', 'redirectPage');
+		$field->attr('value', $data['redirectPage']);
+		$field->label = "Page where user is redirected after succesful login";
+		$fields->add($field);
+
+		return $fields;
+
+	}
+
+	public function install() {
+
+		$name = self::name;
+		$fieldName = self::fieldName;
+
+		$page = $this->pages->get("/$name/");
+		if($page->id) throw new WireException("There is already a page installed called '/$name/'");
+
+		$template = $this->templates->get($name);
+		if($template) throw new WireException("There is already a template installed called '$name'");
+
+		$fieldgroup = $this->fieldgroups->get($name);
+		if($fieldgroup) throw new WireException("There is already a fieldgroup installed called '$name'");
+
+		$field = $this->fields->get($fieldName);
+		if($field) throw new WireException("There is already a field installed called '$fieldName'");
+
+		$role = $this->roles->get($name);
+		if (!$role) {
+			$this->roles->add($name);
+			$this->message("Create role called $name");
+		}
+
+		$fieldgroup = new Fieldgroup();
+		$fieldgroup->name = $name;
+		$title = $this->fields->get('title');
+		if($title) $fieldgroup->add($title);
+		$fieldgroup->save();
+
+		$template = new Template();
+		$template->name = $name;
+		$template->fieldgroup = $fieldgroup;
+		$template->allowPageNum = 1;
+		$template->save();
+		$this->message("Installed template $name");
+
+		$page = new Page();
+		$page->template = $template;
+		$page->parent = '/';
+		$page->name = $name;
+		$page->title = "Facebook Login";
+		$page->addStatus(Page::statusHidden);
+		$page->save();
+		$this->message("Installed page $page->path");
+
+		$basename = $name . ".php";
+		$src = $this->config->paths->SessionFacebookLogin . $basename;
+		$dst = $this->config->paths->templates . $basename;
+		if(@copy($src, $dst)) {
+			$this->message("Installed template file $basename");
+		}	else {
+			$this->error("Templates directory is not writable so we were unable to auto-install the $basename template file.");
+			$this->error("To complete the installation please copy $basename from $src to $dst");
+		}
+
+
+		// Create hidden inputfield
+		$input = new InputfieldText;
+		$input->set('collapsed', Inputfield::collapsedHidden);
+
+		// Create field called facebook_id and set details and inputfield
+		$f = new Field();
+		$f->type = $this->modules->get("FieldtypeText");
+		$f->name = $fieldName;
+		$f->label = 'Facebook ID';
+		$f->description = 'Stores facebook id for user';
+		$f->inputfield = $input;
+		$f->save();
+
+		// Add the field to user fieldgroup (basically means user template in this context)
+		$fg = $this->fieldgroups->get('user');
+		$fg->add($f);
+		$fg->save();
+	}
+
+	public function uninstall() {
+
+	}
+}
