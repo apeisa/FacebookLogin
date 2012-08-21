@@ -15,7 +15,7 @@ class FacebookLogin extends WireData implements Module, ConfigurableModule {
 	public static function getModuleInfo() {
 		return array(
 		 "title" => "Facebook login for website",
-		 "version" => 100,
+		 "version" => 001,
 		 "summary" => "Allows users to authenticate through Facebook. If first time, it let's you choose username.",
 		 "autoload" => false
 		);
